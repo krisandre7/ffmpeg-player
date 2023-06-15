@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(OpenCV REQUIRED)
 include_directories( ${OpenCV_INCLUDE_DIRS})
 
-add_executable(player main.cpp)
+add_executable(player player.cpp)
 
 target_link_libraries(player PRIVATE ${OpenCV_LIBS})
 
