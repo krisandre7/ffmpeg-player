@@ -5,8 +5,10 @@
  */
 #include <iostream>
 #include <vector>
+
 // FFmpeg
-extern "C" {
+extern "C"
+{
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
@@ -17,127 +19,156 @@ extern "C" {
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 
+using namespace std;
+using namespace cv;
 
-int main(int argc, char* argv[])
+// Converte um frame do FFmpeg para uma imagem do OpenCV
+Mat avframeToCvmat(const AVFrame *frame)
 {
-    if (argc < 2) {
-        std::cout << "Usage: ff2cv <infile>" << std::endl;
+    // cria uma imagem do OpenCV
+    int width = frame->width;
+    int height = frame->height;
+    Mat image(height, width, CV_8UC3);
+
+    // copia os dados do frame para a imagem
+    int cvLinesizes[1];
+    cvLinesizes[0] = image.step1();
+
+    // se o frame não tiver formato, retorna a imagem vazia
+    if (frame->format == -1)
+    {
+        return image;
+    }
+
+    // converte o frame para o formato BGR
+    // O formato BGR é o formato padrão do OpenCV
+    SwsContext *conversion = sws_getContext(
+        width, height, (AVPixelFormat)frame->format, width, height,
+        AVPixelFormat::AV_PIX_FMT_BGR24, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+
+    // o sws_scale converte o frame para o formato BGR
+    sws_scale(conversion, frame->data, frame->linesize, 0, height, &image.data,
+              cvLinesizes);
+
+    // libera memória
+    sws_freeContext(conversion);
+
+    return image;
+}
+
+// Referência
+// https://github.com/leandromoreira/ffmpeg-libav-tutorial#intro
+int main(int argc, char *argv[])
+{
+    const char *filename = "video.mp4";
+
+    // aloca um contexto de formato
+    AVFormatContext *pFormatContext = avformat_alloc_context();
+
+    // abre o arquivo de entrada
+    if (avformat_open_input(&pFormatContext, filename, NULL, NULL) != 0)
+    {
+        cerr << "Error: Couldn't open input file." << endl;
         return 1;
     }
-    const char* infile = argv[1];
 
-    // initialize FFmpeg library
-    av_register_all();
-//  av_log_set_level(AV_LOG_DEBUG);
-    int ret;
-
-    // open input file context
-    AVFormatContext* inctx = nullptr;
-    ret = avformat_open_input(&inctx, infile, nullptr, nullptr);
-    if (ret < 0) {
-        std::cerr << "fail to avforamt_open_input(\"" << infile << "\"): ret=" << ret;
-        return 2;
-    }
-    // retrive input stream information
-    ret = avformat_find_stream_info(inctx, nullptr);
-    if (ret < 0) {
-        std::cerr << "fail to avformat_find_stream_info: ret=" << ret;
-        return 2;
+    // recupera informações do formato
+    if (avformat_find_stream_info(pFormatContext, NULL) < 0)
+    {
+        cerr << "Error: Couldn't find stream information." << endl;
+        return 1;
     }
 
-    // find primary video stream
-    AVCodec* vcodec = nullptr;
-    ret = av_find_best_stream(inctx, AVMEDIA_TYPE_VIDEO, -1, -1, &vcodec, 0);
-    if (ret < 0) {
-        std::cerr << "fail to av_find_best_stream: ret=" << ret;
-        return 2;
-    }
-    const int vstrm_idx = ret;
-    AVStream* vstrm = inctx->streams[vstrm_idx];
+    // encontra o primeiro stream de vídeo
+    int videoStream = -1;
+    for (unsigned int i = 0; i < pFormatContext->nb_streams; i++)
+    {
+        // recupera o codec parâmetros para o stream
+        AVCodecParameters *pLocalCodecParameters = pFormatContext->streams[i]->codecpar;
 
-    // open video decoder context
-    ret = avcodec_open2(vstrm->codec, vcodec, nullptr);
-    if (ret < 0) {
-        std::cerr << "fail to avcodec_open2: ret=" << ret;
-        return 2;
-    }
-
-    // print input video stream informataion
-    std::cout
-        << "infile: " << infile << "\n"
-        << "format: " << inctx->iformat->name << "\n"
-        << "vcodec: " << vcodec->name << "\n"
-        << "size:   " << vstrm->codec->width << 'x' << vstrm->codec->height << "\n"
-        << "fps:    " << av_q2d(vstrm->codec->framerate) << " [fps]\n"
-        << "length: " << av_rescale_q(vstrm->duration, vstrm->time_base, {1,1000}) / 1000. << " [sec]\n"
-        << "pixfmt: " << av_get_pix_fmt_name(vstrm->codec->pix_fmt) << "\n"
-        << "frame:  " << vstrm->nb_frames << "\n"
-        << std::flush;
-
-    // initialize sample scaler
-    const int dst_width = vstrm->codec->width;
-    const int dst_height = vstrm->codec->height;
-    const AVPixelFormat dst_pix_fmt = AV_PIX_FMT_BGR24;
-    SwsContext* swsctx = sws_getCachedContext(
-        nullptr, vstrm->codec->width, vstrm->codec->height, vstrm->codec->pix_fmt,
-        dst_width, dst_height, dst_pix_fmt, SWS_BICUBIC, nullptr, nullptr, nullptr);
-    if (!swsctx) {
-        std::cerr << "fail to sws_getCachedContext";
-        return 2;
-    }
-    std::cout << "output: " << dst_width << 'x' << dst_height << ',' << av_get_pix_fmt_name(dst_pix_fmt) << std::endl;
-
-    // allocate frame buffer for output
-    AVFrame* frame = av_frame_alloc();
-    std::vector<uint8_t> framebuf(avpicture_get_size(dst_pix_fmt, dst_width, dst_height));
-    avpicture_fill(reinterpret_cast<AVPicture*>(frame), framebuf.data(), dst_pix_fmt, dst_width, dst_height);
-
-    // decoding loop
-    AVFrame* decframe = av_frame_alloc();
-    unsigned nb_frames = 0;
-    bool end_of_stream = false;
-    int got_pic = 0;
-    AVPacket pkt;
-    do {
-        if (!end_of_stream) {
-            // read packet from input file
-            ret = av_read_frame(inctx, &pkt);
-            if (ret < 0 && ret != AVERROR_EOF) {
-                std::cerr << "fail to av_read_frame: ret=" << ret;
-                return 2;
-            }
-            if (ret == 0 && pkt.stream_index != vstrm_idx)
-                goto next_packet;
-            end_of_stream = (ret == AVERROR_EOF);
-        }
-        if (end_of_stream) {
-            // null packet for bumping process
-            av_init_packet(&pkt);
-            pkt.data = nullptr;
-            pkt.size = 0;
-        }
-        // decode video frame
-        avcodec_decode_video2(vstrm->codec, decframe, &got_pic, &pkt);
-        if (!got_pic)
-            goto next_packet;
-        // convert frame to OpenCV matrix
-        sws_scale(swsctx, decframe->data, decframe->linesize, 0, decframe->height, frame->data, frame->linesize);
+        // se for o stream de vídeo, salva o índice
+        if (pLocalCodecParameters->codec_type == AVMEDIA_TYPE_VIDEO)
         {
-        cv::Mat image(dst_height, dst_width, CV_8UC3, framebuf.data(), frame->linesize[0]);
-        cv::imshow("press ESC to exit", image);
-        if (cv::waitKey(1) == 0x1b)
+            videoStream = i;
+            AVCodec *pLocalCodec = avcodec_find_decoder(pLocalCodecParameters->codec_id);
+
+            // imprime informações sobre o codec
+            cout << "Codec: " << pLocalCodec->long_name << endl;
+
             break;
         }
-        std::cout << nb_frames << '\r' << std::flush;  // dump progress
-        ++nb_frames;
-next_packet:
-        av_free_packet(&pkt);
-    } while (!end_of_stream || got_pic);
-    std::cout << nb_frames << " frames decoded" << std::endl;
+    }
 
-    av_frame_free(&decframe);
-    av_frame_free(&frame);
-    avcodec_close(vstrm->codec);
-    avformat_close_input(&inctx);
+    // se não encontrar o stream de vídeo, retorna erro
+    if (videoStream == -1)
+    {
+        cerr << "Error: Didn't find a video stream." << endl;
+        return 1;
+    }
+
+    // recupera um ponteiro para o codec
+    AVCodecParameters *pCodecParameters = pFormatContext->streams[videoStream]->codecpar;
+
+    // encontra o decoder para o codec
+    AVCodec *pCodec = avcodec_find_decoder(pCodecParameters->codec_id);
+
+    // aloca um contexto do codec
+    AVCodecContext *pCodecContext = avcodec_alloc_context3(pCodec);
+    avcodec_parameters_to_context(pCodecContext, pCodecParameters);
+
+    // abre o codec
+    avcodec_open2(pCodecContext, pCodec, NULL);
+
+    // aloca um pacote de dados e um frame
+    AVPacket *pPacket = av_packet_alloc();
+    AVFrame *pFrame = av_frame_alloc();
+
+    // calcula o frame rate
+    int frame_rate = pFormatContext->streams[videoStream]->avg_frame_rate.num / pFormatContext->streams[videoStream]->avg_frame_rate.den;
+
+    // exibe informações sobre o vídeo
+    while (av_read_frame(pFormatContext, pPacket) >= 0)
+    {
+        if (pPacket->stream_index == videoStream)
+        {
+            // decodifica o frame
+            avcodec_send_packet(pCodecContext, pPacket);
+            avcodec_receive_frame(pCodecContext, pFrame);
+
+            Mat image = avframeToCvmat(pFrame);
+
+            // se o frame não for vazio, exibe-o
+            if (!image.empty())
+            {
+                // show frame according to frame rate
+                int delay = 1000 / frame_rate;
+
+                // exibe o frame
+                imshow("Frame", image);
+
+                // aguarda delay
+                waitKey(delay);
+
+                // libera memória
+                image.release();
+
+                // se pressionar ESC, sai do loop
+                if (waitKey(1) == 27)
+                    break;
+            }
+        }
+
+        // libera o pacote
+        av_packet_unref(pPacket);
+
+        // libera o frame
+        av_frame_unref(pFrame);
+    }
+
+    // libera memória
+    avformat_close_input(&pFormatContext);
+    avformat_free_context(pFormatContext);
+    avcodec_free_context(&pCodecContext);
+
     return 0;
 }

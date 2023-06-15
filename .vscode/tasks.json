@@ -12,7 +12,11 @@
                 "${fileDirname}/${fileBasenameNoExtension}",
                 "`pkg-config",
                 "--cflags",
-                "--libs",
+                "--libs", // add ffmpeg
+                "libavcodec",
+                "libavformat",
+                "libavutil",
+                "libswscale",
                 "opencv4`"
             ],
             "options": {
